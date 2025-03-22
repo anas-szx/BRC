@@ -226,7 +226,8 @@ def calculate_average():
     except Exception as e:
         return 1
     
-    return 0
+    
+
 
 if __name__ == "__main__":
     sys.exit(calculate_average())
