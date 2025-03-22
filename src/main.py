@@ -45,17 +45,16 @@ def process_chunk(filename, start_offset, end_offset):
         except ValueError:
             continue
         
-        # Update the city entry in the dictionary
         if city in data:
             stats = data[city]
             if score < stats[0]:
-                stats[0] = score  # Update min
+                stats[0] = score 
             if score > stats[1]:
-                stats[1] = score  # Update max
-            stats[2] += score     # Add to total
-            stats[3] += 1         # Increment count
+                stats[1] = score 
+            stats[2] += score
+            stats[3] += 1
         else:
-            data[city] = [score, score, score, 1]  # [min, max, total, count]
+            data[city] = [score, score, score, 1] 
     
     return data
 
