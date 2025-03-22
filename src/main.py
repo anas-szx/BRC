@@ -1,126 +1,118 @@
-import multiprocessing as mp
-import os
-from decimal import Decimal, ROUND_HALF_UP
+import math
+import mmap
+import multiprocessing
 
-def process_chunk(chunk_start, chunk_size, filename):
+def round_inf(x):
+    """Round to one decimal place using ceiling (round to infinity)."""
+    return math.ceil(x * 10) / 10
+
+def process_chunk(filename, start_offset, end_offset):
     """Process a chunk of the file and return aggregated results."""
-    aggregates = {}
+    # Use a plain dictionary to hold city data: [min, max, total, count]
+    data = {}
+    with open(filename, "rb") as f:
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        size = len(mm)
+        
+        # Move start_offset to next newline if not at file beginning
+        if start_offset != 0:
+            while start_offset < size and mm[start_offset] != ord('\n'):
+                start_offset += 1
+            start_offset += 1
+        
+        # Extend end_offset to cover the full line
+        end = end_offset
+        while end < size and mm[end] != ord('\n'):
+            end += 1
+        if end < size:
+            end += 1
+        
+        chunk = mm[start_offset:end]
+        mm.close()
     
-    try:
-        with open(filename, "r", encoding='utf-8') as input_file:
-            input_file.seek(chunk_start)
-            
-            if chunk_start > 0:
-                input_file.readline()  # Skip to next full line
-            
-            chunk = input_file.read(chunk_size)
-            
-            if not chunk:
-                return aggregates
-            
-            lines = chunk.splitlines()
-            for line in lines:
-                if not line:
-                    continue
-                try:
-                    city, temp_str = line.split(';')
-                    temp = float(temp_str)
-                    if city not in aggregates:
-                        aggregates[city] = {'min': float('inf'), 
-                                          'max': float('-inf'), 
-                                          'sum': 0.0, 
-                                          'count': 0}
-                    city_data = aggregates[city]
-                    city_data['min'] = min(city_data['min'], temp)
-                    city_data['max'] = max(city_data['max'], temp)
-                    city_data['sum'] += temp
-                    city_data['count'] += 1
-                except (ValueError, IndexError):
-                    continue
-                    
-    except Exception as e:
-        return {'error': str(e)}
-                
-    return aggregates
+    # Process each line using splitlines() for speed
+    for line in chunk.splitlines():
+        if not line:
+            continue
+        
+        # Use partition to separate the two fields
+        city, sep, score_str = line.partition(b';')
+        if sep != b';':
+            continue
+        
+        try:
+            score = float(score_str)
+        except ValueError:
+            continue
+        
+        # Update the city entry in the dictionary
+        if city in data:
+            stats = data[city]
+            if score < stats[0]:
+                stats[0] = score  # Update min
+            if score > stats[1]:
+                stats[1] = score  # Update max
+            stats[2] += score     # Add to total
+            stats[3] += 1         # Increment count
+        else:
+            data[city] = [score, score, score, 1]  # [min, max, total, count]
+    
+    return data
 
-def merge_results(results):
-    """Merge results from all chunks."""
+def merge_data(data_list):
+    """Merge results from all chunks into a single dictionary."""
     final = {}
-    
-    for chunk_result in results:
-        if 'error' in chunk_result:
-            raise Exception(f"Error in worker process: {chunk_result['error']}")
-            
-        for city, data in chunk_result.items():
-            if city not in final:
-                final[city] = {'min': float('inf'), 
-                              'max': float('-inf'), 
-                              'sum': 0.0, 
-                              'count': 0}
-            city_data = final[city]
-            city_data['min'] = min(city_data['min'], data['min'])
-            city_data['max'] = max(city_data['max'], data['max'])
-            city_data['sum'] += data['sum']
-            city_data['count'] += data['count']
-    
+    for data in data_list:
+        for city, stats in data.items():
+            if city in final:
+                final_stats = final[city]
+                if stats[0] < final_stats[0]:
+                    final_stats[0] = stats[0]  # Update min
+                if stats[1] > final_stats[1]:
+                    final_stats[1] = stats[1]  # Update max
+                final_stats[2] += stats[2]    # Add to total
+                final_stats[3] += stats[3]    # Add to count
+            else:
+                final[city] = stats.copy()
     return final
 
-def round_to_one_decimal(value):
-    """Round to one decimal place using IEEE 754 round to infinity."""
-    return float(Decimal(str(value)).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP))
-
 def main(input_file_name="testcase.txt", output_file_name="output.txt"):
-    input_file = open(input_file_name, "r", encoding='utf-8')
-    output_file = open(output_file_name, "w", encoding='utf-8')
+    """Main function to process the input file and write the output."""
+    # Determine file size using mmap for efficiency
+    with open(input_file_name, "rb") as f:
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        file_size = len(mm)
+        mm.close()
     
-    # Get file size
-    input_file.seek(0, 2)  # Move to end
-    file_size = input_file.tell()
-    input_file.seek(0)  # Move back to start
-    
-    if file_size == 0:
-        output_file.close()
-        input_file.close()
+    if file_size == 0:  # Handle empty file case
+        with open(output_file_name, "w") as f:
+            f.write("")
         return
     
-    # Determine chunk size and number of processes
-    num_processes = min(mp.cpu_count(), 8)
-    chunk_size = max(file_size // num_processes, 1024 * 1024)  # Minimum 1MB chunks
-    
-    # Create chunk boundaries
-    chunks = []
-    start = 0
-    while start < file_size:
-        chunks.append((start, chunk_size))
-        start += chunk_size
+    # Use twice the number of CPU cores for better parallelism
+    num_procs = multiprocessing.cpu_count() * 2
+    chunk_size = file_size // num_procs
+    chunks = [(i * chunk_size, (i + 1) * chunk_size if i < num_procs - 1 else file_size)
+              for i in range(num_procs)]
     
     # Process chunks in parallel
-    try:
-        with mp.Pool(processes=num_processes) as pool:
-            results = pool.starmap(process_chunk, 
-                                 [(start, size, input_file_name) for start, size in chunks])
-    except Exception as e:
-        output_file.close()
-        input_file.close()
-        raise Exception(f"Multiprocessing error: {str(e)}")
+    with multiprocessing.Pool(num_procs) as pool:
+        tasks = [(input_file_name, start, end) for start, end in chunks]
+        results = pool.starmap(process_chunk, tasks)
     
-    # Merge results
-    final_result = merge_results(results)
+    # Merge results from all chunks
+    final_data = merge_data(results)
     
-    # Write output with proper rounding and sorting
-    sorted_cities = sorted(final_result.keys())
-    for city in sorted_cities:
-        data = final_result[city]
-        min_temp = round_to_one_decimal(data['min'])
-        mean_temp = round_to_one_decimal(data['sum'] / data['count'])
-        max_temp = round_to_one_decimal(data['max'])
-        output_file.write(f"{city}={min_temp}/{mean_temp}/{max_temp}\n")
+    # Prepare output lines
+    out = []
+    for city in sorted(final_data.keys(), key=lambda c: c.decode()):
+        mn, mx, total, count = final_data[city]
+        avg = round_inf(total / count)
+        out.append(f"{city.decode()}={round_inf(mn):.1f}/{avg:.1f}/{round_inf(mx):.1f}\n")
     
-    output_file.close()
-    input_file.close()
+    # Write output to file
+    with open(output_file_name, "w") as f:
+        f.writelines(out)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        raise
+    main()
