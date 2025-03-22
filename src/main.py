@@ -120,6 +120,7 @@ def main(input_file_name="testcase.txt", output_file_name="output.txt"):
     input_file.close()
 
 if __name__ == "__main__":
+    # main function
     try:
         main()
     except Exception as e:
